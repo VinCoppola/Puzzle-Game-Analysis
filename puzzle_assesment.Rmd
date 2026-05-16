@@ -1,0 +1,393 @@
+---
+title: "Puzzle Briefing"
+author: "Vincenzo Coppola"
+date: "2023-10-17"
+output:html_document: default
+---
+
+# Note:
+
+**Some external images are not consistently uploading but are available in Data/images for reference as well as in the Data Presentation file.**
+
+```{r setup, include=FALSE}
+require("knitr")
+library(png)
+
+opts_knit$set(root.dir = "C:/Users/BigV24/Desktop/Work Stuff/Projects/Puzzle Analysis Challenge/Data")
+
+```
+
+
+## Introduction
+
+This document briefly discusses some of the key findings of the recent release of our new 2 player puzzle game (Game ABC). I will briefly discuss some of the data processing and visualization thought processes while ensuring to highlight key insights along the way.
+
+It was assumed that the data was provided relatively clean and free of issues following some alternative data processing stage, however some data summarization and cleaning was performed as will be described.
+
+The primary tool used was R within R Studio; this includes the majority of data cleaning, processing (where required) and statistical analysis as well as some data visualization. In addition, Tableau was utilized with the cleaned data to provide other insights as will be outlined herein.
+
+```{r Library Load, include = FALSE}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+```
+
+## Data Load & Verification
+
+```{r Data Load, include=TRUE}
+# Data Load 
+activity_df <- read_csv('data_daily_activity.csv')
+colnames(activity_df)[1] <- gsub('^...','','ID')
+
+matches_df <- read_csv('data_matches.csv')
+colnames(matches_df)[1] <- gsub('^...','','ID')
+
+purchases_df <- read_csv('data_in_app_purchases.csv')
+colnames(purchases_df)[1] <- gsub('^...','','ID')
+```
+
+My thought process always begins with ensuring the data is reliable. First, I look a bit more in depth into the column by column statistics to verify the data load and see where the import may have gone awry. I first correct some issues with the import and then move on to statistical summarizing immediately noticing the potential issues in the data.
+
+```{r Verify Activity Data, include = TRUE}
+# Quick Data Load Verification and structure view stored in temp_store to avoid output print
+temp_store <- summary(activity_df)
+
+# View to see levels within each column (If 1 likely not useful for most data science tasks)
+temp_store <- activity_df %>% summarise_all(n_distinct)
+
+print("Here I am checking the ratios of any columns with missing values")
+for (i in colnames(activity_df)){
+  if(sum(is.na(activity_df[[i]])) > 0){
+    num = sum(is.na(activity_df[[i]]))
+    den = (length(activity_df[[i]]))
+    print(paste(i,(num/den) * 100))
+  }
+}
+
+# Viewing some information regarding users within countries and whether or not there may be room to impute NAs
+na_temp <- activity_df %>% group_by(user_id,country) %>% summarise(count = n()) %>% arrange(desc(count))
+
+NA_Count_pre <- activity_df %>% filter((is.na(country)))
+
+activity_df <- activity_df %>%  arrange(country) %>% group_by(user_id) %>% fill(country)
+
+NA_Count_post <- activity_df %>% filter((is.na(country)))
+
+## Checked to see if I could impute NA vals for acquisition but low confidence
+# tt <- activity_df %>%  group_by(user_id) %>% filter(is.na(acquisition_type)) %>% select(user_id)
+# activity_df %>%  filter((user_id %in% tt$user_id) & !(is.na(acquisition_type)))
+
+print(paste('I made the assumption to remove Null values of duplicate users with their viable locations and reduced the NA count by',length(NA_Count_pre$user_id) - length(NA_Count_post$user_id)))
+```
+
+I began by verifying the areas in the activity data where users who have defined locations were later found to have a country listed as NA; I replaced them with their user_id pair. I attempted to discover if the same was possible in the other column containing Nulls, 'acquisition_type' however was unable to confirm any scenarios where I could confidently impute and declared they were best to remain NA.
+
+```{r Verify Match Data, include = TRUE}
+# Quick Data Load Verification and structure view
+temp_store <- summary(matches_df)
+
+# View to see levels within each column (If 1 likely not useful for most data science tasks)
+temp_store <- matches_df %>% summarise_all(n_distinct)
+temp_store <- matches_df %>% arrange(user_id)
+
+print("Here I am checking the ratios of any columns with missing values")
+for (i in colnames(matches_df)){
+  if(sum(is.na(matches_df[[i]])) > 0){
+    print(paste(i,((sum(is.na(matches_df[[i]])))/(length(matches_df[[i]]))) * 100))
+    }
+}
+
+## Making all disconnects and disconnected = disconnected
+matches_df <- matches_df %>% mutate(end_reason = case_when(end_reason == 'disconnect' ~ 'disconnected',
+                                                           end_reason != 'disconnect' ~ end_reason))
+
+# Cant confidently impute NAs for end_reason - will exclude
+
+# Correcting all negative values to be absolute value and 0s to be 1 as at a minimum these values should have registered as 1 game was played. It should not effect the data much as small sample size
+matches_df <- matches_df %>% mutate(n_matches = case_when(n_matches < 0 ~ 0-(n_matches),
+                                            n_matches == 0 ~ 1,
+                                            n_matches >0 ~ n_matches)) %>% arrange(n_matches)
+
+boxplot(n_matches ~ game_mode,data=matches_df, main="Matches Played Dist",
+   xlab="Game Mode", ylab="Matches Played")
+
+boxplot(n_matches ~ end_reason,data=matches_df, main="Matches Played Dist",
+   xlab="Conclusion", ylab="Matches Played")
+
+Outliers <- matches_df %>% 
+  mutate(zscore = abs((mean(n_matches)-n_matches)/(sd(n_matches)))) %>% 
+  subset(zscore>3,select = c(user_id,activity_date,game_mode,end_reason,n_matches)) %>% 
+  mutate('outlier' = TRUE)
+
+log_matches <- matches_df %>% mutate(n_matches = log(n_matches))
+
+boxplot(n_matches ~ game_mode,data=log_matches, main="Matches Played Dist",
+   xlab="Game Mode", ylab="Matches Played")
+
+boxplot(n_matches ~ end_reason,data=log_matches, main="Matches Played Dist",
+   xlab="Conclusion", ylab="Matches Played")
+
+matches_df <- full_join(matches_df,Outliers,by=c('user_id','activity_date','game_mode','n_matches','end_reason')) %>% mutate(outlier = case_when(is.na(outlier) ~ FALSE,
+                                                                                                                       !(is.na(outlier)) ~ outlier))
+
+```
+
+Similarly with the matches data, I sought to remove Null values within the end_reason column however could not do so with confidence so I decided to move forward with the NA values left/excluded (.8% of data). Furthermore, I noticed an issue right away with the n_matches count where there were values of 0 and -1 which according to the data dictionary should not be recorded and therefore since at a minimum, a match is recorded when played once, I converted all -1 and 0s to 1.
+
+I then noticed a large discrepancy between the central tendency and the endpoints of the n_matches values illustrating a major effect of outliars and skew. Therefore I sought to handle outliars, first by identifying those points which were 3 standard deviations away from the mean however since our data very likely could have drastic outliars of this nature I did not want to remove them. Instead I sought to put them on a logarithmic scale which I felt better addressed the data however I again felt it was not as interpretable and therefore identified the outliar rows within a new column called outliar and match counts without removing them thus able to be identified later on.
+
+```{r Verify Purchase Data, include = TRUE}
+# Quick Data Load Verification and structure view
+temp_store <- summary(purchases_df)
+
+# View to see levels within each column (If 1 likely not useful for most data science tasks)
+temp_store <- purchases_df %>% summarise_all(n_distinct)
+
+print("Here I am checking the ratios of any columns with missing values")
+for (i in colnames(purchases_df)){
+  if(sum(is.na(purchases_df[[i]])) > 0){
+    print(paste(i,((sum(is.na(purchases_df[[i]])))/(length(purchases_df[[i]]))) * 100))
+    }
+}
+
+## Imputing missing costs with similar products and missing product names with similar product groups or costs
+purchases_df <- purchases_df %>% arrange(dollar_purchase_value) %>% group_by(product) %>% fill(dollar_purchase_value)
+
+purchases_df <- purchases_df %>% mutate(product = case_when(
+  product_group == 'Season Pass' ~ 'Season Pass',
+  product_group == 'Double Rewards' ~ 'Double Reward Pack',
+  (product_group == 'Promotion') & (is.na(product)) & (dollar_purchase_value != 5.99) ~ 'Other Bundle',
+  (product_group == 'Promotion') & (is.na(product)) & (dollar_purchase_value == 5.99) ~ 'Bundle 3',
+  .default = product))
+
+```
+
+For the purchase data, I immediately noticed an overwhelming 25% of recorded purchases did not have a product identified and therefore utilized similar data to match products to prices and remove missing data. Utilizing this cleaned data, I wrote to new datasets for use in Tableau and further analysis.
+
+```{r Data Wrtiting, include=FALSE}
+# WRITE TO NEW DATASETS
+write.csv(activity_df,"user_activity.csv", row.names=FALSE)
+write.csv(matches_df,"user_matches.csv", row.names=FALSE)
+write.csv(purchases_df,"user_purchases.csv", row.names=FALSE)
+```
+
+## Statistical Analsysis
+
+The initial thought I had was to analyse the User activity rates thus far. Two things stand out to address; that is user retention and user loyalty. To do so, I first set out to address the data that exists through a Daily Active Use and Monthly Active User analysis. Below is the corresponding data supporting that approach.
+
+```{r Active User Analysis, include = TRUE}
+# DAU, MAU and WAU calculations
+
+dau_chart <- activity_df %>% group_by(activity_date) %>% summarise(frequency = n_distinct(user_id))
+
+mau_chart <- activity_df %>% group_by('month' = month(activity_date)) %>% summarise(frequency = n_distinct(user_id))
+
+wau_chart <- activity_df %>% group_by('week' = week(activity_date)) %>% summarise(frequency = n_distinct(user_id))
+
+dau_month_avg <- dau_chart %>% group_by('month' = month(activity_date)) %>% summarise(mean_dau = mean(frequency))
+
+dau_week_avg <- dau_chart %>% group_by('week' = week(activity_date)) %>% summarise(mean_dau = mean(frequency))
+
+ratio_au <- merge(dau_month_avg, mau_chart,by = 'month') %>% mutate(ratio_users = mean_dau/frequency * 100)
+
+ratio_au_week <- merge(dau_week_avg, wau_chart,by = 'week') %>% mutate(ratio_users = mean_dau/frequency * 100)
+
+# churn_rate_df <- dau_chart %>% mutate(month_act = month(activity_date),
+#                      day_act = day(activity_date)) %>% 
+#   group_by(month_act) %>% 
+#   filter(day_act == min(day_act) | day_act == max(day_act))
+#   
+# churn_rate_df %>% group_by(month_act) %>% summarise(churn = ((frequency) - lead(frequency) / 
+# frequency) * 100)
+
+ggplot(dau_chart,aes(x=activity_date,y=frequency))+geom_point()+geom_line() + theme_bw() + labs(title = "Daily Active Users") + xlab("Days") + ylab("Unique Users") + theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(wau_chart,aes(x=week,y=frequency))+geom_point()+geom_line() + theme_bw() + labs(title = "Weekly Active Users") + xlab("Weeks") + ylab("Unique Users") + theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(ratio_au,aes(x=month,y=ratio_users))+geom_bar(stat = 'identity') + theme_bw() + labs(title = "Daily Active vs Monthly Active User Ratio") + xlab("Months") + ylab("DAU / MAU Ratio") + theme(plot.title = element_text(hjust = 0.5)) + geom_label(
+    aes(label = paste0(round(ratio_users,2), "%")), 
+    #position = ?position_dodge(width = 0.9,),
+    nudge_y = -2.5,
+    label.padding = unit(0.25, "lines"),
+    label.size = 0.4,
+    color = "black"
+  )
+
+
+ggplot(ratio_au_week,aes(x=week,y=ratio_users))+geom_bar(stat = 'identity') + theme_bw() + labs(title = "Daily Active vs Weekly Active User Ratio") + xlab("Weeks") + ylab("DAU / WAU Ratio") + theme(plot.title = element_text(hjust = 0.5)) + geom_label(
+    aes(label = paste0(round(ratio_users,2), "%")), 
+    #position = ?position_dodge(width = 0.9,),
+    nudge_y = -2.5,
+    label.padding = unit(0.25, "lines"),
+    label.size = 0.4,
+    color = "black"
+  )
+```
+
+As can be seen above, the app has performed fairly well overall, but I believe there is much room to grow as the data suggests. On average the DAU in the three months showed substantial growth from February to April and the app illustrated an expected DAU/MAU retention ratio around 11-14%. This value rose substantially to \~38% in April however with a small sample size. Regardless, there certainly seems to be good growth as can also be seen interpreted from Tableau.
+
+```{r image import 1, , out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/DAU_MAU_All.png")
+```
+
+Here the total users can be seen showing that aforementioned growth in Unique Active Users with a forecasted continuation of said growth. One downfall that can be seen here is how heavily biased the data has been in regards to our Indian fan base (this makes sense due to the large population of India) however it begs the question have we reached the other nations as well and are there benefits to increasing efforts in those areas. The answer is yes we have reached them but not enough and I recommend we look to do so.
+
+Removing the Indian data records, we can view how the United States, United Kingdom and Brasil have faired over this trial. The data shows an upward trend of equal if not more significance in these areas. The data suggests, the growth in these countries has been more gradual. The benefits are equally apparent as it can be seen users in these nations on average especially tend to spend more for promotions and in game perks.
+
+```{r image import 2, out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/DAU_MAU_United.png")
+```
+
+Looking a bit more in depth at what characterizes our users, we can see that a majority of them are google users which aligns with the fact that India, the predominant user base accounts a large market share of platform to Google. Consistent with the recommendation to better target the US and UK, the data suggests that we are lacking in marketing towards IOS consumers. There is not only a lack of user attraction to IOS but a lack of commitment.
+
+Below can be seen some data referencing the acquisition of users and where it is predominant. The first thing that can be noticed is the sheer lack of users coming from Social Media advertisements. Additionally, something that becomes very apparent looking at IOS users, the percent of users who do not consent to data tracking grows significantly which potentially alludes to a lack of commitment among those users.
+
+```{r image import 3, out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/country_platform_all.png")
+knitr::include_graphics("images/country_platform_ios.png")
+```
+
+I would recommend based on this data to reassess our approach to social media marketing in order to better address users in the US and UK as well as Brazil. As I mentioned, further research should be conducted into reaching out IOS fanbase as we are simply missing the mark as will be shown below. While it may be easy to believe that the numbers show skew due to the population differences, looking below we can see how our users distribute in comparison to the platform market share of each nation.
+
+```{r image import 4, out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/market_share.png")
+```
+
+While we roughly matched the market share in India, the difference between our users and the red marked actual market share (taken from: <https://worldpopulationreview.com/country-rankings/iphone-market-share-by-country>) are very different. Specifically, the IOS users are not reached the way the market should be.
+
+All this is to support the notion that research efforts should seek to address how we market IOS users and reassess the Social Media marketing strategy.
+
+### Stickiness and Conversion
+
+Another key metric that came to mind to really dig into with this data was user loyalty, commitment and putting those together to define the stickiness created by the app. I did so by assigning each user a level of consistency and longevity which were defined as ratios as described below:
+
+Longevity - Ratio of Latest Day played to the total number of days they had the app
+
+Consistency - Ratio of the number of days they were active to the total number of days they had the app
+
+These labels which can be used for modelling in the future if required were used to help characterize users tendencies both here in R and recreated in a similar manor in Tableau.
+
+```{r Loyalty/Stickiness Analysis, include = TRUE}
+activity_purchases_df <- left_join(activity_df,purchases_df, by = c('user_id','activity_date'))
+
+max_date <- as.Date('2023-04-08')
+
+merged_activity_purchase <- activity_purchases_df %>% mutate(days_since_joined = (activity_date - acquisition_date) + 1,
+                                            days_to_play = max_date - acquisition_date)
+
+user_length_playing <- merged_activity_purchase %>% group_by(user_id,acquisition_date,days_to_play) %>% summarise(Most_days_played = max(days_since_joined),
+                                                                                                                  days_played_total = n())
+
+#user_loyalty_info <- merge(user_length_playing, merged_activity_purchase,by.x = #c('user_id','acquisition_date','Most_days_played'), by.y = #c('user_id','acquisition_date','days_since_joined'))
+  
+user_length_playing <- user_length_playing %>% mutate(played_to_possible = ((as.integer(Most_days_played) / as.integer(days_to_play) * 100)),
+consistency = ((as.integer(days_played_total) / as.integer(days_to_play) * 100)))
+
+user_length_playing %>% filter(!(is.na(days_played_total)))
+
+user_loyalty <- user_length_playing %>% mutate(longevity_tag = case_when(
+  days_to_play == 1 ~ 'Joined Last Day',
+  between(as.integer(days_to_play),2,6) ~ 'Potential',
+  days_to_play >= 7 ~ case_when(
+  (played_to_possible >= 85) ~ 'Platinum',
+  (between(played_to_possible, 70, 85)) ~ 'Gold',
+  (between(played_to_possible, 45, 70)) ~ 'Silver',
+  (between(played_to_possible, 20, 45)) ~ 'Bronze',
+  (played_to_possible < 20) ~ 'Short Span')),
+  
+  consistency_tag = case_when(
+    days_to_play == 1 ~ 'Joined Last Day',
+    between(as.integer(days_to_play),2,6) ~ 'Potential',
+    days_to_play >= 7 ~ case_when(
+      (consistency >= 85) ~ 'Platinum',
+      between(consistency, 70, 85)~ 'Gold',
+      between(consistency, 45, 70) ~ 'Silver',
+      between(consistency, 20, 45) ~ 'Bronze',
+      (consistency < 20) ~ 'Inconsistent')))
+
+mean_days <- mean(user_length_playing$days_played_total)
+sd_days <- sd(user_length_playing$days_played_total)
+
+Outliers_days_played <- user_length_playing %>% 
+  mutate(zscore = abs((mean_days - days_played_total) / sd_days)) %>% 
+  subset(zscore>3,select = c(user_id,days_played_total))
+
+user_total_plays <- matches_df %>% group_by(user_id,activity_date) %>% summarise(games_played = sum(n_matches)) %>% mutate(user_total_matches = sum (games_played))
+
+temp_one_day <- user_loyalty %>% filter((Most_days_played == 1) & (consistency_tag != 'Newly Joined')) %>% select(user_id)
+
+temp_onedone_info <- activity_df %>% mutate(one_and_done = case_when((user_id %in% temp_one_day$user_id) ~ TRUE,!(user_id %in% temp_one_day$user_id) ~ FALSE))
+
+#temp_onedone_info %>% group_by(country,one_and_done) %>% summarise(n())
+
+temp_match_loyalty <- merge(temp_onedone_info, user_loyalty, by = 'user_id')
+
+full_data_stickiness <- merge(temp_match_loyalty,matches_df,by = c('user_id','activity_date'))
+
+temp_reasoning <- full_data_stickiness %>% filter(end_reason %in% c('disconnected','won','quit','lost')) %>% group_by(consistency_tag,end_reason) %>% summarise(results = sum(n_matches))
+
+plottable_reasoning <- temp_reasoning %>% group_by(consistency_tag) %>% mutate(result_perc = round((results / sum(results))*100,2))
+
+ggplot(plottable_reasoning, aes(x = consistency_tag, y = result_perc)) +
+  geom_bar(stat = "identity", aes(fill = end_reason)) + labs(title = "How Games End by Consistency Level") + xlab("Consistency") + ylab("Percentage of Total") + theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+One thing that can be noted above is the similarity of distribution among users of all levels of consistent activity however a predominant number of victories indicating that the game may have aspects that some users find too simple. At the same time the only slight difference noticeable above is that inconsistent users experience a slightly higher percentage of disconnections. I would recommend allocating a small amount of development resources to optimizing server connections and implementing game competitiveness levels like Easy Medium Hard to see if users tend to go for more competition.More data that supports this is the tendency of loyal users to play the quick mode and bot mode likely indicating a desire for more competition outside of friends and normal timed games. This graphic can be seen below from Tableau.
+
+```{r image import 5, out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/game_mode_plays.png")
+```
+
+### Conversion
+
+In addition to game mode and results there are insights that can be drawn from loyal users and their purchase habits. To begin I wanted to get a sense of the app's conversion rate as done in R below.
+
+```{r Conversion Analysis, include=TRUE}
+temp_purchase_loyalty <- merge(purchases_df, user_loyalty, by = 'user_id')
+
+temp_purchasing <- temp_purchase_loyalty %>% group_by(consistency_tag,product_group) %>% summarise(counts = n())
+
+plottable_purchasing <- temp_purchasing %>% group_by(consistency_tag) %>% mutate(perc = round((counts / sum(counts))*100,2))
+
+ggplot(plottable_purchasing, aes(x = consistency_tag, y = perc)) +
+  geom_bar(stat = "identity", aes(fill = product_group))
+
+purchasers <- activity_purchases_df %>% ungroup() %>% filter(!(is.na(dollar_purchase_value))) %>% group_by(country) %>% summarise(purchasers = n_distinct(user_id))
+
+total_users <- activity_df %>% ungroup() %>% group_by(country)%>% summarise(total_users = n_distinct(user_id))
+
+conversion_rate_df <- merge(purchasers,total_users,by = 'country') %>% drop_na() %>% mutate(conversion_rate = purchasers / total_users * 100)
+
+print(conversion_rate_df %>% arrange(desc(conversion_rate)))
+```
+
+While most users can be seen in the graphic to spend on the same products there is a tendency of commited and loyal users to purchase season passes which may be intuitive and therefore left me to think where are we missing the mark with users. Looking at the table our conversion rates can be seen with a high of 1.35% in the UK and 1.19% second in the US two countries we notably have not performed well in general in. This supports the prior notion to invest resources in improving outreach there and also shows we are subpar in converting users to purchasing (an expected 2%).
+
+The question then becomes, how long is the typical user converted in general. In Tableau, I looked at this and found it takes an average of 7.69 days of having the app for a user to make their first payment if at all. Furthermore, it can be seen on average loyal consumers are well above that mark and less committed users are typically not meeting it.
+
+```{r image import 6, out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/AVG_first_day_purchase.png")
+knitr::include_graphics("images/Last_Day_Recorded_Loyalty.png")
+```
+
+But is there a difference for us whether or not a user is committed profit wise. The answer is a resounding yes. With the minimal conversion rate we currently have and the small sample size trial, the data suggests that in some cases we can double the amount of incoming purchase amounts when we can convert these users. I therefore recommend looking into finding new and exciting ways to try the game in depth for upwards of a week or two including free trials, and promotions etc.
+
+```{r image import 7, out.width = "30%", fig.align = "center", echo=FALSE}
+knitr::include_graphics("images/profiting.png")
+```
+
+```{r Unused for Initial Analysis, include = FALSE}
+#full_data_purchases <- left_join(full_data_stickiness,purchases_df,by = c('user_id','activity_date'))
+
+#ggplot(merged_activity_purchase,aes(days_since_joined,dollar_purchase_value))+geom_point(aes(color = product))
+
+#ggplot(full_data_purchases %>% drop_na(),aes(days_to_play,product_group))+geom_point(aes(color = longevity_tag))
+
+#ggplot(merged_activity_purchase %>% drop_na(), aes(x = country)) + geom_bar(stat = 'identity',aes(fill = product_group))
+
+#ggplot(merged_activity_purchase %>% drop_na(), aes(country,count(dollar_purchase_value))) + geom_bar(stat = 'identity',aes(fill = product_group))
+```
